@@ -1,0 +1,123 @@
+//@version=5
+// Strategy: Optimized Trading Strategy with EMA and ADX Filters (5 minutes)
+strategy("Optimized Strategy with Filter (5 minutes)", overlay=true)
+
+// Parameters for EMA (Exponential Moving Average)
+ema_short_period = input.int(5, title="Short EMA Period", minval=1)
+ema_long_period = input.int(20, title="Long EMA Period", minval=1)
+ema_trend_period = input.int(50, title="Trend EMA Period", minval=1)
+
+// Parameters for Stop-Loss, Take-Profit, and Trailing Stop
+stop_loss_atr_multiplier = input.float(1, title="ATR Multiplier for Stop Loss", minval=0.1)
+take_profit_perc = input.float(70.0, title="Take Profit (%)", minval=0.1) / 100
+trail_offset_perc = input.float(1.0, title="Trailing Stop (%)", minval=0.1) / 100
+
+// Parameters for ATR (Average True Range) and ADX (Average Directional Index)
+atr_period = input.int(14, title="ATR Period", minval=1)
+adx_period = input.int(14, title="ADX Period", minval=1)
+adx_threshold = input.float(22, title="ADX Threshold (Trend Strength)", minval=1)
+adx_smoothing = input.int(14, title="ADX Smoothing Period", minval=1)
+
+// RSI (Relative Strength Index) parameters
+rsi_period = input.int(14, title="RSI Period")
+rsi_overbought = input.int(65, title="Overbought Level")
+rsi_oversold = input.int(35, title="Oversold Level")
+rsi_value = ta.rsi(close, rsi_period)
+
+// Variables to track entry price and current profit
+var float entry_price = na
+var float current_profit = 0.0
+
+// Indicator calculations
+ema_short = ta.ema(close, ema_short_period)
+ema_long = ta.ema(close, ema_long_period)
+ema_trend = ta.ema(close, ema_trend_period)
+atr = ta.atr(atr_period)
+
+// ADX calculation
+[plusDI, minusDI, adx] = ta.dmi(adx_period, adx_smoothing)
+
+// Plot EMAs on the chart
+plot(ema_short, title="Short EMA", color=color.blue)
+plot(ema_long, title="Long EMA", color=color.red)
+plot(ema_trend, title="Trend EMA", color=color.orange)
+
+// Trend EMA and slope calculations
+ema_trend_long = ta.ema(close, 250)
+ema_trend_long_prev = ta.ema(close[3], 250)
+
+// Calculate EMA slope and ratio
+ema_slope_positive = ema_trend_long > ema_trend_long_prev
+ema_slope_negative = ema_trend_long < ema_trend_long_prev
+ema_ratio = ema_trend_long/ema_trend_long_prev
+
+// Trend conditions
+is_bullish_trend = close > ema_trend_long and ema_slope_positive and ema_ratio > 1.0
+is_bearish_trend = close < ema_trend_long and ema_slope_negative and ema_ratio < 1.0
+
+// Plot the long-term EMA
+ema_long_plot = plot(ema_trend_long, title="EMA Long (250)", color=color.green, linewidth=2)
+price_plot = plot(close, title="Price", display=display.none)
+
+// Fill colors for trends
+fill(price_plot, ema_long_plot, 
+     color = is_bullish_trend ? color.new(color.green, 90) : 
+             is_bearish_trend ? color.new(color.red, 90) : 
+             color.new(color.gray, 90),
+     title="Trend Fill")
+
+// Add trend labels for clarity
+if barstate.islast
+    label.new(bar_index, high, 
+              text = is_bullish_trend ? "BULLISH" : 
+                     is_bearish_trend ? "BEARISH" : "NEUTRAL",
+              color = is_bullish_trend ? color.green : 
+                      is_bearish_trend ? color.red : 
+                      color.gray,
+              style = label.style_label_down,
+              textcolor = color.white)
+
+
+// Buy and Sell conditions
+buy_condition = ta.crossover(ema_short, ema_long) and close > ema_trend and adx > adx_threshold and rsi_value > rsi_oversold and is_bullish_trend
+sell_condition = ta.crossunder(ema_short, ema_long) and close < ema_trend and adx > adx_threshold and rsi_value < rsi_overbought
+
+// Stop-Loss, Take-Profit, and Trailing Stop calculations
+stop_loss_level = close - (atr * stop_loss_atr_multiplier)
+take_profit_level = take_profit_perc * close
+trail_offset = trail_offset_perc * close
+
+// Adaptive risk management based on volatility (ATR) and trend strength (ADX)
+risk_factor_atr = atr / close            // Higher ATR relative to close means more volatility
+risk_factor_adx = adx / 100              // ADX/100 gives a ratio between 0 and 1
+base_risk = 0.01                         // Base risk of 1% per trade
+
+// Adjust risk based on market conditions
+adjusted_risk = base_risk * (1 - risk_factor_atr) * (1 + risk_factor_adx)
+adjusted_risk := math.max(adjusted_risk, 0.05)  // Minimum risk limit
+adjusted_risk := math.min(adjusted_risk, 0.5)   // Maximum risk limit (5%)
+
+// Position sizing calculation based on adjusted risk
+risk_per_trade = strategy.equity * adjusted_risk
+qty = risk_per_trade / (close - stop_loss_level)
+
+// Manage stop-loss based on half-profit condition
+if strategy.position_size > 0
+    close_condition = close < (entry_price - (atr * 2)) and (adx > adx_threshold)
+    if close_condition
+        strategy.close("Buy", comment="Stop Loss")
+
+// Buy condition (long entry)
+if buy_condition
+    strategy.entry("Buy", strategy.long, qty=math.round(qty))
+    entry_price := close
+    current_profit := 0.0
+
+// Trailing stop exit logic
+if strategy.position_size > 0 and ta.crossunder(ema_short, ema_long)
+    strategy.exit("Exit Long", from_entry="Buy", trail_offset=trail_offset, profit=take_profit_level)
+
+// Short positions are disabled (long only strategy)
+if false
+    if sell_condition
+        strategy.entry("Sell", strategy.short)
